@@ -1,0 +1,28 @@
+# 支持的语言列表
+SUPPORTED_LANGUAGES = {
+    "中文": "Chinese",
+    "英语": "English",
+    "法语": "French",
+    "德语": "German",
+    "西班牙语": "Spanish",
+    "意大利语": "Italian",
+    "日语": "Japanese",
+    "韩语": "Korean",
+    "俄语": "Russian",
+    "葡萄牙语": "Portuguese",
+    "阿拉伯语": "Arabic",
+    "荷兰语": "Dutch",
+    "波兰语": "Polish",
+    "土耳其语": "Turkish",
+    "瑞典语": "Swedish",
+    "丹麦语": "Danish",
+    "芬兰语": "Finnish",
+    "希腊语": "Greek",
+    "捷克语": "Czech",
+    "匈牙利语": "Hungarian",
+    "罗马尼亚语": "Romanian",
+    "保加利亚语": "Bulgarian",
+    "印尼语": "Indonesian",
+    "泰语": "Thai",
+    "越南语": "Vietnamese"
+} 

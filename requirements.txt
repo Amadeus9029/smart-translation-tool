@@ -1,4 +1,3 @@
-tkinter
 pandas
 chardet
 openai

@@ -21,6 +21,10 @@ class SubtitleTranslateFrame(ttk.Frame):
         self.subtitle_content = []
         self.translated_content = []
         
+        # 翻译设置
+        self.batch_size = tk.StringVar(value="20")  # 默认批量翻译20条
+        self.max_batch_size = 30  # 最大批量数量限制
+        
         self.create_layout()
         
     def create_layout(self):
@@ -65,6 +69,14 @@ class SubtitleTranslateFrame(ttk.Frame):
                                       width=15)
         self.target_lang.set("中文")
         self.target_lang.pack(side="left", padx=5)
+        
+        # 批量设置区域
+        batch_frame = ttk.Frame(control_frame)
+        batch_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(batch_frame, text="批量翻译数量:").pack(side="left")
+        batch_entry = ttk.Entry(batch_frame, textvariable=self.batch_size, width=10)
+        batch_entry.pack(side="left", padx=5)
         
         # 翻译按钮
         self.translate_btn = ttk.Button(lang_frame, text="开始翻译",
@@ -206,6 +218,19 @@ class SubtitleTranslateFrame(ttk.Frame):
         if self.is_translating:
             return
             
+        try:
+            # 验证批量翻译数量
+            batch_size = int(self.batch_size.get())
+            if batch_size <= 0:
+                raise ValueError("批量翻译数量必须大于0")
+            if batch_size > self.max_batch_size:
+                if not messagebox.askyesno("警告", 
+                    f"批量翻译数量 {batch_size} 可能过大，建议不超过 {self.max_batch_size} 条。\n是否继续？"):
+                    return
+        except ValueError as e:
+            messagebox.showerror("错误", f"批量翻译数量设置无效: {str(e)}")
+            return
+            
         self.is_translating = True
         self.translate_btn.config(state="disabled")
         self.status_label.config(text="正在翻译...")
@@ -219,38 +244,126 @@ class SubtitleTranslateFrame(ttk.Frame):
             client = OpenAI(api_key=self.api_key, base_url=self.DEEPSEEK_BASE_URL)
             self.translated_content = []
             
-            # 批量翻译，每次处理10条字幕
-            batch_size = 10
-            for i in range(0, len(self.subtitle_content), batch_size):
+            # 获取批量翻译数量
+            batch_size = int(self.batch_size.get())
+            
+            # 批量翻译
+            total_items = len(self.subtitle_content)
+            for i in range(0, total_items, batch_size):
                 batch = self.subtitle_content[i:i + batch_size]
                 texts = [item['text'] for item in batch]
                 
-                # 构建提示词
-                prompt = f"请将以下{self.source_lang.get()}字幕翻译成{self.target_lang.get()}，保持原文的格式和语气：\n\n"
-                prompt += "\n---\n".join(texts)
+                # 构建提示词，要求直接翻译，不添加任何额外注释
+                prompt = f"""请将以下{len(texts)}条字幕从{self.source_lang.get()}翻译成{self.target_lang.get()}。
+注意事项：
+1. 只翻译文本内容，不要添加任何翻译注释或说明
+2. 保持原文的语气和表达方式
+3. 每条翻译必须用换行分隔
+4. 必须按顺序翻译每一条字幕
+5. 不要遗漏任何一条字幕
+6. 不要添加任何额外的标点符号或格式
+
+原文：
+{chr(10).join(f"{j+1}. {text}" for j, text in enumerate(texts))}
+
+请按照原文顺序翻译，每条翻译占一行。"""
                 
-                response = client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[
-                        {"role": "system", "content": "你是一个专业的字幕翻译专家。"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.3,
-                    max_tokens=2000
-                )
+                max_retries = 3  # 最大重试次数
+                retry_count = 0
+                success = False
                 
-                # 解析翻译结果
-                translations = response.choices[0].message.content.strip().split("\n---\n")
-                
-                # 更新翻译结果
-                for j, translation in enumerate(translations):
-                    item = batch[j].copy()
-                    item['translation'] = translation.strip()
-                    self.translated_content.append(item)
+                while retry_count < max_retries and not success:
+                    try:
+                        # 如果是重试，且批次大于10，则减半批量大小
+                        if retry_count > 0 and len(batch) > 10:
+                            half_size = len(batch) // 2
+                            # 分两次处理这个批次
+                            for split_start in range(0, len(batch), half_size):
+                                split_end = min(split_start + half_size, len(batch))
+                                split_batch = batch[split_start:split_end]
+                                split_texts = [item['text'] for item in split_batch]
+                                
+                                # 更新提示词
+                                split_prompt = prompt.replace(
+                                    f"以下{len(texts)}条字幕",
+                                    f"以下{len(split_batch)}条字幕"
+                                ).replace(
+                                    chr(10).join(f"{j+1}. {text}" for j, text in enumerate(texts)),
+                                    chr(10).join(f"{j+1}. {text}" for j, text in enumerate(split_texts))
+                                )
+                                
+                                response = client.chat.completions.create(
+                                    model="deepseek-chat",
+                                    messages=[
+                                        {"role": "system", "content": "你是一个专业的字幕翻译专家。请严格按照原文顺序翻译每一条字幕，每条翻译占一行。"},
+                                        {"role": "user", "content": split_prompt}
+                                    ],
+                                    temperature=0.3,
+                                    max_tokens=4000
+                                )
+                                
+                                # 处理翻译结果
+                                translations = response.choices[0].message.content.strip().split('\n')
+                                translations = [t.strip() for t in translations if t.strip()]
+                                
+                                if len(translations) != len(split_batch):
+                                    raise ValueError(f"翻译结果数量不匹配：期望 {len(split_batch)} 条，实际获得 {len(translations)} 条")
+                                
+                                # 更新翻译结果
+                                for j, translation in enumerate(translations):
+                                    item = split_batch[j].copy()
+                                    # 清理翻译文本
+                                    translation = re.sub(r'^\d+[\.\、\s]*', '', translation)
+                                    translation = re.sub(r'[\[【].*?[\]】]', '', translation)
+                                    item['translation'] = translation.strip()
+                                    self.translated_content.append(item)
+                            
+                            success = True
+                            break
+                            
+                        else:
+                            response = client.chat.completions.create(
+                                model="deepseek-chat",
+                                messages=[
+                                    {"role": "system", "content": "你是一个专业的字幕翻译专家。请严格按照原文顺序翻译每一条字幕，每条翻译占一行。"},
+                                    {"role": "user", "content": prompt}
+                                ],
+                                temperature=0.3,
+                                max_tokens=4000
+                            )
+                            
+                            # 解析翻译结果
+                            translations = response.choices[0].message.content.strip().split('\n')
+                            translations = [t.strip() for t in translations if t.strip()]
+                            
+                            # 确保翻译结果数量与原文匹配
+                            if len(translations) == len(batch):
+                                # 更新翻译结果
+                                for j, translation in enumerate(translations):
+                                    item = batch[j].copy()
+                                    # 清理翻译文本
+                                    translation = re.sub(r'^\d+[\.\、\s]*', '', translation)
+                                    translation = re.sub(r'[\[【].*?[\]】]', '', translation)
+                                    item['translation'] = translation.strip()
+                                    self.translated_content.append(item)
+                                success = True
+                                break
+                            else:
+                                raise ValueError(f"翻译结果数量不匹配：期望 {len(batch)} 条，实际获得 {len(translations)} 条")
+                    
+                    except Exception as e:
+                        retry_count += 1
+                        if retry_count >= max_retries:
+                            raise Exception(f"批次{i//batch_size + 1}翻译失败: {str(e)}")
+                        self.status_label.config(text=f"第{i//batch_size + 1}批翻译出错，正在第{retry_count + 1}次重试...")
                 
                 # 更新进度
-                progress = min(100, int((i + len(batch)) / len(self.subtitle_content) * 100))
-                self.status_label.config(text=f"翻译进度: {progress}%")
+                progress = min(100, int(len(self.translated_content) / total_items * 100))
+                self.status_label.config(text=f"翻译进度: {progress}% ({len(self.translated_content)}/{total_items})")
+            
+            # 确保所有字幕都已翻译
+            if len(self.translated_content) != total_items:
+                raise ValueError(f"翻译不完整：期望 {total_items} 条，实际翻译 {len(self.translated_content)} 条")
             
             # 显示翻译结果
             self.show_translation()
@@ -263,7 +376,7 @@ class SubtitleTranslateFrame(ttk.Frame):
         finally:
             self.is_translating = False
             self.translate_btn.config(state="normal")
-            self.status_label.config(text="翻译完成")
+            self.status_label.config(text=f"翻译完成 ({len(self.translated_content)}/{total_items})")
             
     def show_translation(self):
         """显示翻译结果"""
@@ -296,29 +409,53 @@ class SubtitleTranslateFrame(ttk.Frame):
             
     def save_srt(self, output_path):
         """保存SRT格式字幕"""
-        with open(output_path, 'w', encoding='utf-8') as f:
-            for i, item in enumerate(self.translated_content, 1):
-                f.write(f"{i}\n")
-                f.write(f"{item['start']} --> {item['end']}\n")
-                f.write(f"{item['translation']}\n\n")
-                
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                for i, item in enumerate(self.translated_content, 1):
+                    f.write(f"{i}\n")
+                    f.write(f"{item['start']} --> {item['end']}\n")
+                    f.write(f"{item['translation']}\n\n")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存翻译文件失败: {str(e)}")
+            
     def save_ass(self, output_path):
         """保存ASS格式字幕"""
-        # 首先复制原文件的样式部分
-        with open(self.source_file, 'r', encoding='utf-8') as f:
-            content = f.read()
+        try:
+            # 首先复制原文件的样式部分
+            with open(self.source_file, 'rb') as f:
+                raw_data = f.read()
+                result = chardet.detect(raw_data)
+                encoding = result['encoding']
+
+            with open(self.source_file, 'r', encoding=encoding) as f:
+                content = f.read()
             
-        # 找到[Events]部分
-        parts = content.split('[Events]')
-        if len(parts) != 2:
-            raise ValueError("无效的ASS文件格式")
+            # 找到[Events]部分
+            parts = content.split('[Events]')
+            if len(parts) != 2:
+                raise ValueError("无效的ASS文件格式")
             
-        header = parts[0] + '[Events]\n'
-        
-        # 写入新文件
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(header)
-            # 写入翻译后的对话行
-            for item in self.translated_content:
-                dialogue = f"Dialogue: 0,{item['start']},{item['end']},{item['style']},,0,0,0,,{item['translation']}\n"
-                f.write(dialogue) 
+            # 获取Format行
+            format_line = ""
+            events_lines = parts[1].split('\n')
+            for line in events_lines:
+                if line.startswith('Format:'):
+                    format_line = line
+                    break
+            
+            # 写入新文件
+            with open(output_path, 'w', encoding='utf-8') as f:
+                # 写入样式部分
+                f.write(parts[0])
+                # 写入Events标记和Format行
+                f.write('[Events]\n')
+                if format_line:
+                    f.write(format_line + '\n')
+                # 写入翻译后的对话行，保持原始格式
+                for item in self.translated_content:
+                    # 保持原始的Dialogue格式，只替换文本部分
+                    dialogue = f"Dialogue: 0,{item['start']},{item['end']},{item['style']},,0,0,0,,{item['translation']}\n"
+                    f.write(dialogue)
+                
+        except Exception as e:
+            messagebox.showerror("错误", f"保存翻译文件失败: {str(e)}") 
